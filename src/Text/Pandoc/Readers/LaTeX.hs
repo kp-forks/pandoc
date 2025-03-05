@@ -4,7 +4,7 @@
 {-# LANGUAGE ViewPatterns          #-}
 {- |
    Module      : Text.Pandoc.Readers.LaTeX
-   Copyright   : Copyright (C) 2006-2023 John MacFarlane
+   Copyright   : Copyright (C) 2006-2024 John MacFarlane
    License     : GNU GPL, version 2 or above
 
    Maintainer  : John MacFarlane <jgm@berkeley.edu>
@@ -114,9 +114,9 @@ parseLaTeX = do
 
 resolveRefs :: M.Map Text [Inline] -> Inline -> Inline
 resolveRefs labels x@(Link (ident,classes,kvs) _ _) =
-  case (lookup "reference-type" kvs,
+  case (T.takeWhile (/='+') <$> lookup "reference-type" kvs,
         lookup "reference" kvs) of
-        (Just "ref", Just lab) ->
+        (Just "ref", Just lab) -> -- TODO special treatment of ref+label
           case M.lookup lab labels of
                Just txt -> Link (ident,classes,kvs) txt ("#" <> lab, "")
                Nothing  -> x
@@ -207,11 +207,13 @@ doLHSverb =
 
 mkImage :: PandocMonad m => [(Text, Text)] -> Text -> LP m Inlines
 mkImage options (T.unpack -> src) = do
-   let replaceTextwidth (k,v) =
+   let replaceRelative (k,v) =
          case numUnit v of
               Just (num, "\\textwidth") -> (k, showFl (num * 100) <> "%")
+              Just (num, "\\linewidth") -> (k, showFl (num * 100) <> "%")
+              Just (num, "\\textheight") -> (k, showFl (num * 100) <> "%")
               _                         -> (k, v)
-   let kvs = map replaceTextwidth
+   let kvs = map replaceRelative
              $ filter (\(k,_) -> k `elem` ["width", "height"]) options
    let attr = ("",[], kvs)
    let alt = maybe (str "image") str $ lookup "alt" options
@@ -384,20 +386,18 @@ inlineCommands = M.unions
     , ("lowercase", makeLowercase <$> tok)
     , ("thanks", skipopts >> note <$> grouped block)
     , ("footnote", skipopts >> footnote)
+    , ("newline", pure B.linebreak)
+    , ("linebreak", pure B.linebreak)
     , ("passthrough", fixPassthroughEscapes <$> tok)
     -- \passthrough macro used by latex writer
                            -- for listings
     , ("includegraphics", do options <- option [] keyvals
-                             src <- braced
-                             mkImage options .
-                               unescapeURL .
-                               removeDoubleQuotes $ untokenize src)
+                             src <- bracedFilename
+                             mkImage options . unescapeURL $ src)
     -- svg
     , ("includesvg",      do options <- option [] keyvals
-                             src <- braced
-                             mkImage options .
-                               unescapeURL .
-                               removeDoubleQuotes $ untokenize src)
+                             src <- bracedFilename
+                             mkImage options . unescapeURL $ src)
     -- hyperref
     , ("url", (\url -> linkWith ("",["uri"],[]) url "" (str url))
                         . unescapeURL . untokenize <$> bracedUrl)
@@ -435,6 +435,14 @@ inlineCommands = M.unions
     -- generally only used in \date
     , ("today", today)
     ]
+
+bracedFilename :: PandocMonad m => LP m Text
+bracedFilename =
+  removeDoubleQuotes . T.strip . untokenize . filter (not . isComment) <$> braced
+
+isComment :: Tok -> Bool
+isComment (Tok _ Comment _) = True
+isComment _ = False
 
 today :: PandocMonad m => LP m Inlines
 today =
@@ -531,9 +539,9 @@ ifToggle :: PandocMonad m => LP m ()
 ifToggle = do
   name <- braced
   spaces
-  yes <- braced
+  yes <- withVerbatimMode braced
   spaces
-  no <- braced
+  no <- withVerbatimMode braced
   toggles <- sToggles <$> getState
   TokStream _ inp <- getInput
   let name' = untokenize name
@@ -549,8 +557,8 @@ ifstrequal :: (PandocMonad m, Monoid a) => LP m a
 ifstrequal = do
   str1 <- tok
   str2 <- tok
-  ifequal <- braced
-  ifnotequal <- braced
+  ifequal <- withVerbatimMode braced
+  ifnotequal <- withVerbatimMode braced
   TokStream _ ts <- getInput
   if str1 == str2
      then setInput $ TokStream False (ifequal ++ ts)
@@ -717,7 +725,7 @@ rawBlockOr name fallback = do
 doSubfile :: PandocMonad m => LP m Blocks
 doSubfile = do
   skipMany opt
-  f <- T.unpack . removeDoubleQuotes . T.strip . untokenize <$> braced
+  f <- T.unpack <$> bracedFilename
   oldToks <- getInput
   setInput $ TokStream False []
   insertIncluded (ensureExtension (/= "") ".tex" f)
@@ -735,7 +743,7 @@ include name = do
           _ -> const False
   skipMany opt
   fs <- map (T.unpack . removeDoubleQuotes . T.strip) . T.splitOn "," .
-         untokenize <$> braced
+         untokenize . filter (not . isComment) <$> braced
   mapM_ (insertIncluded . ensureExtension isAllowed ".tex") fs
   return mempty
 
@@ -743,7 +751,7 @@ usepackage :: (PandocMonad m, Monoid a) => LP m a
 usepackage = do
   skipMany opt
   fs <- map (T.unpack . removeDoubleQuotes . T.strip) . T.splitOn "," .
-         untokenize <$> braced
+           untokenize . filter (not . isComment) <$> braced
   let parsePackage f = do
         TokStream _ ts <- getIncludedToks (ensureExtension (== ".sty") ".sty" f)
         parseFromToks (do _ <- blocks
@@ -1005,15 +1013,16 @@ skipSameFileToks = do
     skipMany $ infile (sourceName pos)
 
 environments :: PandocMonad m => M.Map Text (LP m Blocks)
-environments = M.union (tableEnvironments blocks inline) $
+environments = M.union (tableEnvironments block inline) $
    M.fromList
    [ ("document", env "document" blocks <* skipMany anyTok)
    , ("abstract", mempty <$ (env "abstract" blocks >>= addMeta "abstract"))
    , ("sloppypar", env "sloppypar" blocks)
    , ("letter", env "letter" letterContents)
-   , ("minipage", env "minipage" $
-          skipopts *> spaces *> optional braced *> spaces *> blocks)
+   , ("minipage", divWith ("",["minipage"],[]) <$>
+       env "minipage" (skipopts *> spaces *> optional braced *> spaces *> blocks))
    , ("figure", env "figure" $ skipopts *> figure')
+   , ("figure*", env "figure*" $ skipopts *> figure')
    , ("subfigure", env "subfigure" $ skipopts *> tok *> figure')
    , ("center", divWith ("", ["center"], []) <$> env "center" blocks)
    , ("quote", blockQuote <$> env "quote" blocks)
