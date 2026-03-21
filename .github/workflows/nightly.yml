@@ -18,7 +18,7 @@ jobs:
     - name: Install ghc
       run: |
         ghcup install ghc --set 9.10
-        ghcup install cabal --set 3.14
+        ghcup install cabal --set latest
 
     - name: Update from Hackage
       run: |
@@ -26,8 +26,7 @@ jobs:
 
     - name: Install alex, happy
       run: |
-        cabal install happy --disable-tests
-        cabal install alex --disable-tests
+        cabal install alex happy
 
     - name: Install dependencies
       run: |
@@ -62,7 +61,7 @@ jobs:
         cabal update
     - name: Install alex, happy
       run: |
-        cabal install alex happy --disable-tests
+        cabal install alex happy
     - name: Install dependencies
       run: |
           cabal build --dependencies-only -fembed_data_files -fnightly pandoc-cli
@@ -101,7 +100,7 @@ jobs:
         cabal update
     - name: Install alex, happy
       run: |
-        cabal install alex happy --disable-tests
+        cabal install alex happy
     - name: Install dependencies
       run: |
           cabal build --dependencies-only -fnightly -fembed_data_files -fhttp pandoc-cli
